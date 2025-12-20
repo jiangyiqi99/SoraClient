@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import mimetypes
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -10,6 +11,12 @@ import requests
 from .config import get_api_key
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1/videos"
+SUPPORTED_UPLOAD_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "video/mp4",
+}
 
 
 @dataclass
@@ -62,10 +69,19 @@ class SoraClient:
             fields[key] = str(value)
         files = {key: (None, value) for key, value in fields.items()}
         if input_reference:
+            mime_type, _ = mimetypes.guess_type(str(input_reference))
+            if not mime_type:
+                raise ValueError(
+                    f"Unsupported input_reference file type for {input_reference.name}."
+                )
+            if mime_type not in SUPPORTED_UPLOAD_MIME_TYPES:
+                raise ValueError(
+                    f"Unsupported input_reference mimetype ({mime_type})."
+                )
             files["input_reference"] = (
                 input_reference.name,
                 input_reference.open("rb"),
-                "application/octet-stream",
+                mime_type,
             )
         try:
             return self._request_json("POST", self.base_url, headers=headers, files=files)

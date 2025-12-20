@@ -43,6 +43,10 @@ def _parse_extra(extra_json: str) -> Dict[str, Any]:
     return json.loads(extra_json)
 
 
+def _error_result(exc: Exception) -> Dict[str, Any]:
+    return {"error": {"type": exc.__class__.__name__, "message": str(exc)}}
+
+
 def _normalize_seconds(seconds: str) -> Optional[int]:
     if not seconds or seconds == "default":
         return None
@@ -171,34 +175,38 @@ def create_video_job(
     download: bool,
     output_dir: str,
 ) -> Tuple[str, Optional[str]]:
-    client = SoraClient(api_key=api_key or None)
-    ref_path = Path(input_reference) if input_reference else None
-    job = client.create_video(
-        prompt=prompt,
-        model=model or None,
-        seconds=_normalize_seconds(seconds),
-        size=_normalize_size(size),
-        input_reference=ref_path,
-        **_parse_extra(extra_json),
-    )
-    job_id = job.get("id")
-    result = job
-
-    if poll and job_id:
-        result = client.wait_for_completion(
-            job_id,
-            poll_interval=poll_interval,
-            timeout=timeout,
+    try:
+        client = SoraClient(api_key=api_key or None)
+        ref_path = Path(input_reference) if input_reference else None
+        job = client.create_video(
+            prompt=prompt,
+            model=model or None,
+            seconds=_normalize_seconds(seconds),
+            size=_normalize_size(size),
+            input_reference=ref_path,
+            **_parse_extra(extra_json),
         )
-    _save_job_json(result)
+        job_id = job.get("id")
+        result = job
 
-    video_path = None
-    if download and job_id and result.get("status") == "completed":
-        out_dir = Path(output_dir or "./output")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        video_path = client.download_video_content(job_id, out_dir / f"{job_id}.mp4")
+        if poll and job_id:
+            result = client.wait_for_completion(
+                job_id,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+        _save_job_json(result)
 
-    return json.dumps(result, indent=2, ensure_ascii=True), str(video_path) if video_path else None
+        video_path = None
+        if download and job_id and result.get("status") == "completed":
+            out_dir = Path(output_dir or "./output")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            video_path = client.download_video_content(job_id, out_dir / f"{job_id}.mp4")
+
+        return json.dumps(result, indent=2, ensure_ascii=True), str(video_path) if video_path else None
+    except Exception as exc:
+        result = _error_result(exc)
+        return json.dumps(result, indent=2, ensure_ascii=True), None
 
 
 def retrieve_video_job(
@@ -211,34 +219,42 @@ def retrieve_video_job(
     download: bool,
     output_dir: str,
 ) -> Tuple[str, Optional[str]]:
-    client = SoraClient(api_key=api_key or None)
-    result = client.retrieve_video(video_id)
+    try:
+        client = SoraClient(api_key=api_key or None)
+        result = client.retrieve_video(video_id)
 
-    if poll:
-        result = client.wait_for_completion(
-            video_id,
-            poll_interval=poll_interval,
-            timeout=timeout,
-        )
-    if job_label == "Custom" or not job_label:
-        _save_job_json(result)
-    else:
-        _update_job_json(job_label, result)
+        if poll:
+            result = client.wait_for_completion(
+                video_id,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+        if job_label == "Custom" or not job_label:
+            _save_job_json(result)
+        else:
+            _update_job_json(job_label, result)
 
-    video_path = None
-    if download and result.get("status") == "completed":
-        out_dir = Path(output_dir or "./output")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        video_path = client.download_video_content(video_id, out_dir / f"{video_id}.mp4")
+        video_path = None
+        if download and result.get("status") == "completed":
+            out_dir = Path(output_dir or "./output")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            video_path = client.download_video_content(video_id, out_dir / f"{video_id}.mp4")
 
-    return json.dumps(result, indent=2, ensure_ascii=True), str(video_path) if video_path else None
+        return json.dumps(result, indent=2, ensure_ascii=True), str(video_path) if video_path else None
+    except Exception as exc:
+        result = _error_result(exc)
+        return json.dumps(result, indent=2, ensure_ascii=True), None
 
 
 def delete_video_job(video_id: str, job_file: str, api_key: str) -> str:
-    client = SoraClient(api_key=api_key or None)
-    result = client.delete_video(video_id)
-    _delete_job_file_for_id(job_file, video_id)
-    return json.dumps(result, indent=2, ensure_ascii=True)
+    try:
+        client = SoraClient(api_key=api_key or None)
+        result = client.delete_video(video_id)
+        _delete_job_file_for_id(job_file, video_id)
+        return json.dumps(result, indent=2, ensure_ascii=True)
+    except Exception as exc:
+        result = _error_result(exc)
+        return json.dumps(result, indent=2, ensure_ascii=True)
 
 
 def build_ui() -> gr.Blocks:
@@ -274,7 +290,7 @@ def build_ui() -> gr.Blocks:
                 lines=3,
                 placeholder='{"seed": 123}',
             )
-            poll = gr.Checkbox(label="Poll until completed", value=True)
+            poll = gr.Checkbox(label="Poll until completed", value=False)
             poll_interval = gr.Number(label="Poll interval (seconds)", value=5.0, precision=1)
             timeout = gr.Number(label="Timeout (seconds)", value=600.0, precision=0)
             download = gr.Checkbox(label="Download MP4 when completed", value=True)
@@ -304,7 +320,11 @@ def build_ui() -> gr.Blocks:
 
         with gr.Tab("Image → Video"):
             prompt_i = gr.Textbox(label="Prompt", lines=3)
-            input_reference = gr.File(label="Input reference image", type="filepath")
+            input_reference = gr.File(
+                label="Input reference (image or mp4)",
+                type="filepath",
+                file_types=[".jpg", ".jpeg", ".png", ".webp", ".mp4"],
+            )
             model_i = gr.Dropdown(
                 label="Model",
                 choices=["sora-2", "sora-2-pro"],
@@ -325,7 +345,7 @@ def build_ui() -> gr.Blocks:
                 lines=3,
                 placeholder='{"seed": 123}',
             )
-            poll_i = gr.Checkbox(label="Poll until completed", value=True)
+            poll_i = gr.Checkbox(label="Poll until completed", value=False)
             poll_interval_i = gr.Number(label="Poll interval (seconds)", value=5.0, precision=1)
             timeout_i = gr.Number(label="Timeout (seconds)", value=600.0, precision=0)
             download_i = gr.Checkbox(label="Download MP4 when completed", value=True)
@@ -360,7 +380,7 @@ def build_ui() -> gr.Blocks:
             remix_prompt = gr.Textbox(label="Remix prompt", lines=3)
             remix_btn = gr.Button("Start remix job")
             remix_result = gr.Textbox(label="Result JSON", lines=12)
-            remix_poll = gr.Checkbox(label="Poll until completed", value=True)
+            remix_poll = gr.Checkbox(label="Poll until completed", value=False)
             remix_interval = gr.Number(label="Poll interval (seconds)", value=5.0, precision=1)
             remix_timeout = gr.Number(label="Timeout (seconds)", value=600.0, precision=0)
             remix_download = gr.Checkbox(label="Download MP4 when completed", value=True)
@@ -377,28 +397,32 @@ def build_ui() -> gr.Blocks:
                 download_flag: bool,
                 output_dir_value: str,
             ) -> Tuple[str, Optional[str]]:
-                client = SoraClient(api_key=api_key_value or None)
-                job = client.remix_video(video_id, prompt_text)
-                result = job
-                job_id = job.get("id") or video_id
-                if poll_flag and job_id:
-                    result = client.wait_for_completion(
-                        job_id,
-                        poll_interval=interval_value,
-                        timeout=timeout_value,
+                try:
+                    client = SoraClient(api_key=api_key_value or None)
+                    job = client.remix_video(video_id, prompt_text)
+                    result = job
+                    job_id = job.get("id") or video_id
+                    if poll_flag and job_id:
+                        result = client.wait_for_completion(
+                            job_id,
+                            poll_interval=interval_value,
+                            timeout=timeout_value,
+                        )
+                    video_path = None
+                    if download_flag and job_id and result.get("status") == "completed":
+                        out_dir = Path(output_dir_value or "./output")
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        video_path = client.download_video_content(
+                            job_id, out_dir / f"{job_id}.mp4"
+                        )
+                    _save_job_json(result)
+                    return (
+                        json.dumps(result, indent=2, ensure_ascii=True),
+                        str(video_path) if video_path else None,
                     )
-                video_path = None
-                if download_flag and job_id and result.get("status") == "completed":
-                    out_dir = Path(output_dir_value or "./output")
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    video_path = client.download_video_content(
-                        job_id, out_dir / f"{job_id}.mp4"
-                    )
-                _save_job_json(result)
-                return (
-                    json.dumps(result, indent=2, ensure_ascii=True),
-                    str(video_path) if video_path else None,
-                )
+                except Exception as exc:
+                    result = _error_result(exc)
+                    return json.dumps(result, indent=2, ensure_ascii=True), None
 
             remix_btn.click(
                 _remix_flow,
@@ -439,7 +463,7 @@ def build_ui() -> gr.Blocks:
             jobs_refresh_r = gr.Button("Refresh jobs")
             jobs_r = gr.Dropdown(label="Jobs", choices=_job_choices(), value="Custom")
             video_id = gr.Textbox(label="Video ID")
-            poll_r = gr.Checkbox(label="Poll until completed", value=True)
+            poll_r = gr.Checkbox(label="Poll until completed", value=False)
             poll_interval_r = gr.Number(label="Poll interval (seconds)", value=5.0, precision=1)
             timeout_r = gr.Number(label="Timeout (seconds)", value=600.0, precision=0)
             download_r = gr.Checkbox(label="Download MP4 when completed", value=True)
