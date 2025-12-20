@@ -129,6 +129,21 @@ class SoraClient:
                     f.write(chunk)
         return output_path
 
+    def download_video_content_bytes(self, video_id: str) -> bytes:
+        api_key = self._resolve_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"}
+        url = f"{self.base_url}/{video_id}/content"
+        response = requests.get(url, headers=headers, timeout=self.timeout, stream=True)
+        if not response.ok:
+            try:
+                error_body = response.json()
+            except ValueError:
+                error_body = response.text
+            raise RuntimeError(
+                f"OpenAI API error {response.status_code}: {error_body}"
+            )
+        return response.content
+
     def wait_for_completion(
         self,
         video_id: str,
