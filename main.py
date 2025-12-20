@@ -65,6 +65,19 @@ def _save_job_json(data: Dict[str, Any]) -> Path:
     return path
 
 
+def _update_job_json(job_label: str, data: Dict[str, Any]) -> bool:
+    filename = _job_label_to_filename(job_label)
+    if not filename:
+        return False
+    path = JOBS_DIR / filename
+    if not path.exists():
+        return False
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=True)
+        f.write("\n")
+    return True
+
+
 def _list_job_choices() -> list[str]:
     if not JOBS_DIR.exists():
         return []
@@ -190,6 +203,7 @@ def create_video_job(
 
 def retrieve_video_job(
     video_id: str,
+    job_label: str,
     api_key: str,
     poll: bool,
     poll_interval: float,
@@ -206,7 +220,10 @@ def retrieve_video_job(
             poll_interval=poll_interval,
             timeout=timeout,
         )
-    _save_job_json(result)
+    if job_label == "Custom" or not job_label:
+        _save_job_json(result)
+    else:
+        _update_job_json(job_label, result)
 
     video_path = None
     if download and result.get("status") == "completed":
@@ -434,6 +451,7 @@ def build_ui() -> gr.Blocks:
                 retrieve_video_job,
                 inputs=[
                     video_id,
+                    jobs_r,
                     api_key,
                     poll_r,
                     poll_interval_r,
