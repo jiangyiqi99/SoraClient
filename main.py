@@ -16,15 +16,16 @@ from sora_client.config import set_api_key
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 JOBS_DIR = PROJECT_ROOT / "jobs"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 
 BASE_SIZES = [
-    "1280x720",
-    "1920x1080",
     "720x1280",
-    "1080x1920",
-    "1024x1024",
+    "1280x720",
 ]
-PRO_SIZES = ["1024x1792", "1792x1024"]
+PRO_SIZES = [
+    "1024x1792",
+    "1792x1024",
+]
 TRANSCRIPTION_MODELS = [
     "gpt-4o-transcribe",
     "gpt-4o-mini-transcribe",
@@ -75,9 +76,10 @@ def _normalize_optional(value: str) -> Optional[str]:
     return value.strip()
 
 
-def _write_temp_file(filename: str, payload: bytes) -> str:
-    temp_dir = Path(tempfile.mkdtemp(prefix="sora_client_"))
-    path = temp_dir / filename
+
+def _write_output_file(filename: str, payload: bytes) -> str:
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUTPUTS_DIR / filename
     with path.open("wb") as f:
         f.write(payload)
     return str(path)
@@ -91,17 +93,18 @@ def _update_download_button(path: str) -> Any:
 
 def _cleanup_download(path: str) -> Tuple[Any, str]:
     if path:
-        time.sleep(0.5)
         file_path = Path(path)
         try:
-            file_path.unlink()
-        except OSError:
-            pass
-        try:
-            file_path.parent.rmdir()
+            if file_path.exists():
+                file_path.unlink()
         except OSError:
             pass
     return gr.update(value=None, label="Downloaded", interactive=False), ""
+def _list_output_files() -> list[str]:
+    if not OUTPUTS_DIR.exists():
+        return []
+    return sorted(str(p) for p in OUTPUTS_DIR.glob("*.mp4")) + \
+           sorted(str(p) for p in OUTPUTS_DIR.glob("*.mp3"))
 
 
 def _audio_model_choices(mode: str) -> list[str]:
@@ -122,8 +125,18 @@ def _toggle_transcription_language(mode: str) -> gr.Textbox:
     return gr.update(interactive=True)
 
 
-def _toggle_transcription_format(mode: str, current_value: str) -> gr.Dropdown:
-    choices = ["default", "json", "text", "srt", "vtt", "verbose_json"]
+def _toggle_transcription_format(mode: str, model_name: str, current_value: str) -> gr.Dropdown:
+    # translations: only whisper-1 is offered, keep full format options
+    if mode == "translations":
+        choices = ["default", "json", "text", "srt", "vtt", "verbose_json"]
+    else:
+        # transcriptions: 4o-transcribe models only support JSON
+        if model_name in ("gpt-4o-transcribe", "gpt-4o-mini-transcribe"):
+            choices = ["default", "json"]
+        else:
+            # whisper-1 supports additional output formats
+            choices = ["default", "json", "text", "srt", "vtt", "verbose_json"]
+
     value = current_value if current_value in choices else "default"
     return gr.update(choices=choices, value=value)
 
@@ -268,7 +281,7 @@ def create_video_job(
         video_path = None
         if download and job_id and result.get("status") == "completed":
             content = client.download_video_content_bytes(job_id)
-            video_path = _write_temp_file(f"{job_id}.mp4", content)
+            video_path = _write_output_file(f"{job_id}.mp4", content)
 
         return json.dumps(result, indent=2, ensure_ascii=True), video_path
     except Exception as exc:
@@ -303,7 +316,7 @@ def retrieve_video_job(
         video_path = None
         if download and result.get("status") == "completed":
             content = client.download_video_content_bytes(video_id)
-            video_path = _write_temp_file(f"{video_id}.mp4", content)
+            video_path = _write_output_file(f"{video_id}.mp4", content)
 
         return json.dumps(result, indent=2, ensure_ascii=True), video_path
     except Exception as exc:
@@ -370,7 +383,7 @@ def text_to_speech(
             voice=_normalize_optional(voice) or "coral",
             instructions=_normalize_optional(instructions),
         )
-        output_path = _write_temp_file("speech.mp3", payload)
+        output_path = _write_output_file("speech.mp3", payload)
         return "Ready to download.", output_path
     except Exception as exc:
         result = _error_result(exc)
@@ -381,6 +394,37 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Sora-2 Videos Client") as demo:
         gr.Markdown("# Sora-2 Videos Client")
         gr.Markdown("Create and retrieve video jobs via the OpenAI Videos API.")
+
+        gr.Markdown("## Existing Outputs")
+        outputs_refresh = gr.Button("Refresh outputs")
+        outputs_dropdown = gr.Dropdown(
+            label="Saved outputs",
+            choices=_list_output_files(),
+        )
+        outputs_download = gr.DownloadButton(
+            label="Download selected",
+            interactive=False,
+        )
+
+        def _select_output_file(path: str):
+            if path:
+                return gr.update(value=path, interactive=True)
+            return gr.update(value=None, interactive=False)
+
+        outputs_refresh.click(
+            lambda: gr.update(choices=_list_output_files()),
+            outputs=outputs_dropdown,
+        )
+        outputs_dropdown.change(
+            _select_output_file,
+            inputs=outputs_dropdown,
+            outputs=outputs_download,
+        )
+        outputs_download.click(
+            _cleanup_download,
+            inputs=outputs_dropdown,
+            outputs=[outputs_download, outputs_dropdown],
+        )
 
         with gr.Row():
             api_key = gr.Textbox(label="API key", type="password", placeholder="sk-... (optional if saved)")
@@ -548,7 +592,7 @@ def build_ui() -> gr.Blocks:
                     video_path = None
                     if download_flag and job_id and result.get("status") == "completed":
                         content = client.download_video_content_bytes(job_id)
-                        video_path = _write_temp_file(f"{job_id}.mp4", content)
+                        video_path = _write_output_file(f"{job_id}.mp4", content)
                     _save_job_json(result)
                     return (
                         json.dumps(result, indent=2, ensure_ascii=True),
@@ -688,7 +732,12 @@ def build_ui() -> gr.Blocks:
             audio_mode.change(_toggle_transcription_language, inputs=audio_mode, outputs=audio_language)
             audio_mode.change(
                 _toggle_transcription_format,
-                inputs=[audio_mode, audio_format],
+                inputs=[audio_mode, audio_model, audio_format],
+                outputs=audio_format,
+            )
+            audio_model.change(
+                _toggle_transcription_format,
+                inputs=[audio_mode, audio_model, audio_format],
                 outputs=audio_format,
             )
 
