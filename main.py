@@ -28,6 +28,7 @@ PRO_SIZES = [
 ]
 TRANSCRIPTION_MODELS = [
     "gpt-4o-transcribe",
+    "gpt-4o-transcribe-diarize",
     "gpt-4o-mini-transcribe",
     "whisper-1",
 ]
@@ -130,8 +131,11 @@ def _toggle_transcription_format(mode: str, model_name: str, current_value: str)
     if mode == "translations":
         choices = ["default", "json", "text", "srt", "vtt", "verbose_json"]
     else:
-        # transcriptions: 4o-transcribe models only support JSON
-        if model_name in ("gpt-4o-transcribe", "gpt-4o-mini-transcribe"):
+        # diarization model supports diarized_json
+        if model_name == "gpt-4o-transcribe-diarize":
+            choices = ["default", "json", "text", "diarized_json"]
+        # 4o transcribe models only support JSON
+        elif model_name in ("gpt-4o-transcribe", "gpt-4o-mini-transcribe"):
             choices = ["default", "json"]
         else:
             # whisper-1 supports additional output formats
@@ -362,6 +366,47 @@ def audio_to_text(
                 response_format=_normalize_optional(response_format),
             )
         raw = result.get("raw", {})
+
+        # Only format diarization if both the diarization model is selected AND response_format is exactly "diarized_json".
+        is_diarize = (
+            (_normalize_optional(model) or TRANSCRIPTION_MODELS[0]) == "gpt-4o-transcribe-diarize"
+            and (_normalize_optional(response_format) == "diarized_json")
+        )
+
+        # If diarization was requested but there are no segments, fall back to plain text.
+        if is_diarize and not (raw.get("segments") or []):
+            return result.get("text", ""), json.dumps(raw, indent=2, ensure_ascii=True)
+
+        if is_diarize:
+            segments = raw.get("segments") or []
+            speaker_map: Dict[str, str] = {}
+            speaker_order: list[str] = []
+            lines: list[str] = []
+
+            def _person_label(s: str) -> str:
+                if s not in speaker_map:
+                    speaker_order.append(s)
+                    speaker_map[s] = f"Person {len(speaker_order)}"
+                return speaker_map[s]
+
+            last_person: Optional[str] = None
+            for seg in segments:
+                speaker = str(seg.get("speaker", "")).strip() or "Unknown"
+                person = _person_label(speaker)
+                text_piece = str(seg.get("text", "")).strip()
+                if not text_piece:
+                    continue
+
+                if lines and last_person == person:
+                    # merge adjacent segments for the same speaker
+                    lines[-1] = lines[-1] + " " + text_piece
+                else:
+                    lines.append(f"{person}: {text_piece}")
+                    last_person = person
+
+            formatted = "\n".join(lines).strip()
+            return formatted, json.dumps(raw, indent=2, ensure_ascii=True)
+
         return result.get("text", ""), json.dumps(raw, indent=2, ensure_ascii=True)
     except Exception as exc:
         result = _error_result(exc)
@@ -706,7 +751,7 @@ def build_ui() -> gr.Blocks:
             )
             audio_format = gr.Dropdown(
                 label="Response format",
-                choices=["default", "json", "text", "srt", "vtt", "verbose_json"],
+                choices=["default", "json", "text", "srt", "vtt", "verbose_json", "diarized_json"],
                 value="default",
             )
             audio_btn = gr.Button("Run audio → text")
